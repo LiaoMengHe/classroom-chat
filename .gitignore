@@ -4,12 +4,8 @@ __pycache__/
 *.pyo
 *.spec
 
-# Build
+# Build artifacts
 build/
-dist/
-
-# PyInstaller
-*.exe
 
 # IDE
 .idea/
@@ -26,5 +22,3 @@ Thumbs.db
 /.codegraph/
 nul
 ui.py.bak
-*.spec
-build/
