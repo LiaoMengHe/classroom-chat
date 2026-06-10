@@ -48,7 +48,7 @@ _shell32.DragQueryFileW.restype = wintypes.UINT
 from client import ChatClient, DiscoveryListener
 from server import ChatServer
 from protocol import make_file_chunk, compute_file_hash, SOCKS5_PORT
-from proxy import Socks5Proxy
+from proxy import Socks5Proxy, HttpConnectProxy, HTTP_PROXY_PORT
 import history
 
 
@@ -170,6 +170,7 @@ class App(tk.Tk):
         self.client.on_users = self._on_users_update
         self.client.on_disconnect = self._on_client_disconnect
         self.client.on_rename_ok = self._on_rename_ok
+        self.client.on_proxy_info = self._on_proxy_info
 
         err = self.client.connect("127.0.0.1", nick)
         if err:
@@ -190,6 +191,7 @@ class App(tk.Tk):
         self.client.on_users = self._on_users_update
         self.client.on_disconnect = self._on_client_disconnect
         self.client.on_rename_ok = self._on_rename_ok
+        self.client.on_proxy_info = self._on_proxy_info
 
         err = self.client.connect(ip, nick)
         if err:
@@ -232,24 +234,31 @@ class App(tk.Tk):
             self._start_proxy()
 
     def _start_proxy(self):
-        """启动 SOCKS5 代理并通知服务器广播"""
+        """启动 SOCKS5 + HTTP CONNECT 代理并通知服务器广播"""
         try:
-            proxy = Socks5Proxy(port=SOCKS5_PORT)
-            ok = proxy.start()
-            if ok:
-                self.proxy = proxy
+            socks5 = Socks5Proxy(port=SOCKS5_PORT)
+            socks5_ok = socks5.start()
+            http_proxy = HttpConnectProxy(port=HTTP_PROXY_PORT)
+            http_ok = http_proxy.start()
+            if socks5_ok or http_ok:
+                self.proxy = socks5
+                self.http_proxy = http_proxy
                 self.proxy_enabled = True
                 if self.server:
-                    self.server.set_proxy_port(SOCKS5_PORT)
+                    # UDP 广播用 HTTP 代理端口（浏览器直接支持）
+                    self.server.set_proxy_port(HTTP_PROXY_PORT)
                 if isinstance(self.current_page, ChatPage):
-                    self.current_page.on_proxy_status(True, SOCKS5_PORT)
-                    self.current_page._add_system_msg("🌐 已开启网络共享 (SOCKS5 :10800)")
+                    self.current_page.on_proxy_status(True, HTTP_PROXY_PORT)
+                    self.current_page._add_system_msg("🌐 已开启网络共享 (HTTP :10801 / SOCKS5 :10800)")
         except Exception as e:
             if isinstance(self.current_page, ChatPage):
                 self.current_page._add_system_msg(f"❌ 开启网络共享失败: {e}")
 
     def _stop_proxy(self):
-        """停止 SOCKS5 代理"""
+        """停止所有代理"""
+        if hasattr(self, 'http_proxy') and self.http_proxy:
+            self.http_proxy.stop()
+            self.http_proxy = None
         if self.proxy:
             self.proxy.stop()
             self.proxy = None
@@ -261,17 +270,17 @@ class App(tk.Tk):
             self.current_page._add_system_msg("🌐 已关闭网络共享")
 
     def _enable_system_proxy(self, ip: str, port: int):
-        """设置 Windows 系统代理为 SOCKS5（方案A：修改注册表）"""
+        """设置 Windows 系统代理为 HTTP（浏览器 100% 生效）"""
         try:
             import winreg
             key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
-                proxy_server = f"socks={ip}:{port}"
+                proxy_server = f"http={ip}:{port}"
                 winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, proxy_server)
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
             if isinstance(self.current_page, ChatPage):
-                self.current_page._add_system_msg(f"🌐 已启用系统代理 (socks://{ip}:{port})")
-                self.current_page._add_system_msg("💡 浏览器已自动走代理，不使用时可点「关闭系统代理」")
+                self.current_page._add_system_msg(f"🌐 已启用系统代理 (http://{ip}:{port})")
+                self.current_page._add_system_msg("💡 浏览器已自动走共享网络，不使用可点「使用共享」关闭")
         except Exception as e:
             if isinstance(self.current_page, ChatPage):
                 self.current_page._add_system_msg(f"❌ 设置系统代理失败: {e}")
@@ -395,6 +404,11 @@ class App(tk.Tk):
         """改名成功（后台线程调用）"""
         if isinstance(self.current_page, ChatPage):
             self.after(0, self.current_page.on_rename_ok, new_nick)
+
+    def _on_proxy_info(self, proxy_port: int):
+        """房间代理信息更新（后台线程调用）"""
+        if isinstance(self.current_page, ChatPage):
+            self.after(0, self.current_page._update_proxy_info, proxy_port)
 
     def _handle_disconnect(self):
         if self.current_page and isinstance(self.current_page, ChatPage):
@@ -1390,6 +1404,25 @@ class ChatPage(tk.Frame):
             self.use_proxy_btn.config(text="✅ 已启用", fg="#27AE60", state="disabled")
         else:
             self._add_system_msg("❌ 未发现可用的网络共享")
+
+    def _update_proxy_info(self, proxy_port: int):
+        """房间代理信息更新（房主开启/关闭共享时由服务器广播触发）"""
+        self._proxy_port = proxy_port
+        if proxy_port > 0 and self._proxy_ip:
+            # 显示"使用共享"按钮（如果还没显示）
+            if hasattr(self, 'use_proxy_btn'):
+                if not self.use_proxy_btn.winfo_manager():
+                    self.use_proxy_btn.pack(side="left", padx=(8, 0))
+                self.use_proxy_btn.config(text="🌐 使用共享", fg=COLOR_ACCENT, state="normal")
+                self._add_system_msg(f"🌐 房间已开启网络共享 (:{proxy_port})")
+        elif proxy_port > 0:
+            # 有代理端口但不知道 IP（不太可能，兜底）
+            pass
+        else:
+            # 代理已关闭
+            if hasattr(self, 'use_proxy_btn') and self.use_proxy_btn.winfo_manager():
+                self.use_proxy_btn.pack_forget()
+            self._add_system_msg("🌐 房间已关闭网络共享")
 
     IMAGE_EXTENSIONS = {".png", ".gif", ".ppm", ".pgm", ".bmp", ".ico", ".xbm", ".jpg", ".jpeg"}
 

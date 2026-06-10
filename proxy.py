@@ -1,5 +1,5 @@
 """
-proxy.py — SOCKS5 代理服务器（纯 Python socket，零外部依赖）
+proxy.py — SOCKS5 + HTTP CONNECT 代理服务器（纯 Python socket，零外部依赖）
 
 用法:
     proxy = Socks5Proxy(host="0.0.0.0", port=10800)
@@ -7,13 +7,18 @@ proxy.py — SOCKS5 代理服务器（纯 Python socket，零外部依赖）
     ...
     proxy.stop()
 
-支持: CONNECT (TCP 转发)，无认证
+    http_proxy = HttpConnectProxy(host="0.0.0.0", port=10801)
+    http_proxy.start()
+    ...
+    http_proxy.stop()
 """
 
 import socket
 import threading
 
 from protocol import SOCKS5_PORT
+
+HTTP_PROXY_PORT = 10801
 
 
 class Socks5Proxy:
@@ -161,6 +166,122 @@ class Socks5Proxy:
 
         t1 = threading.Thread(target=forward, args=(client, remote, "C→R"), daemon=True)
         t2 = threading.Thread(target=forward, args=(remote, client, "R→C"), daemon=True)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+
+class HttpConnectProxy:
+    """HTTP CONNECT 代理（浏览器直接支持，零外部依赖）
+
+    浏览器走系统 HTTP 代理时，发 CONNECT host:port HTTP/1.1 请求，
+    本类解析后转发 TCP 流量。
+    """
+
+    def __init__(self, host="0.0.0.0", port=HTTP_PROXY_PORT):
+        self.host = host
+        self.port = port
+        self._sock = None
+        self._running = False
+        self._thread = None
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind((self.host, self.port))
+        self._sock.listen(32)
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True, name="HTTP-Proxy-Accept")
+        self._thread.start()
+        return True
+
+    def stop(self):
+        self._running = False
+        if self._sock:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    @property
+    def running(self):
+        return self._running
+
+    def _accept_loop(self):
+        while self._running:
+            try:
+                client, addr = self._sock.accept()
+                threading.Thread(target=self._handle_client, args=(client,), daemon=True).start()
+            except OSError:
+                break
+
+    def _handle_client(self, client: socket.socket):
+        """处理 HTTP CONNECT 请求"""
+        try:
+            data = client.recv(4096)
+            if not data:
+                return
+            request_line = data.split(b"\r\n")[0].decode("utf-8", errors="replace")
+            parts = request_line.split()
+            if len(parts) < 3 or parts[0] != "CONNECT":
+                client.sendall(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
+                return
+            host_port = parts[1]
+            host, port_str = host_port.rsplit(":", 1)
+            port = int(port_str)
+
+            # 连接目标
+            try:
+                remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                remote.settimeout(15)
+                remote.connect((host, port))
+                remote.settimeout(None)
+            except Exception:
+                client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                return
+
+            # 回复成功
+            client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+
+            # 双向转发
+            self._relay(client, remote)
+        except Exception:
+            pass
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def _relay(self, client, remote):
+        """双向数据转发"""
+        closed = [False]
+        def forward(src, dst):
+            try:
+                while True:
+                    data = src.recv(65536)
+                    if not data:
+                        break
+                    dst.sendall(data)
+            except Exception:
+                pass
+            finally:
+                if not closed[0]:
+                    closed[0] = True
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                    try:
+                        remote.close()
+                    except Exception:
+                        pass
+        t1 = threading.Thread(target=forward, args=(client, remote), daemon=True)
+        t2 = threading.Thread(target=forward, args=(remote, client), daemon=True)
         t1.start()
         t2.start()
         t1.join()

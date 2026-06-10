@@ -35,6 +35,7 @@ class ChatClient:
         self.on_disconnect = None     # func()
         self.on_users = None          # func(user_list)
         self.on_rename_ok = None      # func(new_nick)
+        self.on_proxy_info = None     # func(proxy_port)
 
     # ── 连接 ──────────────────────────────────────────────
 
@@ -212,8 +213,14 @@ class ChatClient:
 
                 msg_type_str = msg.get("type")
 
-                if msg_type_str == "users" and self.on_users:
-                    self.on_users(msg["users"])
+                if msg_type_str == "users":
+                    if self.on_users:
+                        self.on_users(msg["users"])
+                    # 代理信息变化时通知 UI
+                    proxy_port = msg.get("proxy_port", 0)
+                    if self.on_proxy_info and proxy_port != getattr(self, "_last_proxy_port", -1):
+                        self._last_proxy_port = proxy_port
+                        self.on_proxy_info(proxy_port)
 
                 if msg_type_str in ("chat", "system", "file_start", "file_end",
                                     "private_chat", "private_file_start", "private_file_end"):

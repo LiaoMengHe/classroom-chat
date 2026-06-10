@@ -120,7 +120,10 @@ class ChatServer:
 
         # ★ 先单独给新客户端发送用户列表（保证它收到的第一条消息是 users）
         try:
-            send_json(sock, {"type": "users", "users": list(self.clients.values())})
+            msg = {"type": "users", "users": list(self.clients.values())}
+            if self._proxy_port:
+                msg["proxy_port"] = self._proxy_port
+            send_json(sock, msg)
         except OSError:
             pass
 
@@ -347,10 +350,13 @@ class ChatServer:
             self._broadcast_users()
 
     def _broadcast_users(self):
-        """发送当前在线用户列表给所有客户端"""
+        """发送当前在线用户列表给所有客户端（含代理信息）"""
         with self.clients_lock:
             users = list(self.clients.values())
-        self._broadcast({"type": "users", "users": users})
+        msg = {"type": "users", "users": users}
+        if self._proxy_port:
+            msg["proxy_port"] = self._proxy_port
+        self._broadcast(msg)
 
     # ── UDP 发现广播 ──────────────────────────────────────
 
