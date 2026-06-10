@@ -69,6 +69,10 @@ class ChatClient:
             self.connected = True
             if self.on_users:
                 self.on_users(resp["users"])
+            # 首次 users 消息携带代理信息
+            proxy_port = resp.get("proxy_port", 0)
+            if self.on_proxy_info and proxy_port:
+                self.on_proxy_info(proxy_port)
 
             # 启动接收线程
             self.recv_thread = threading.Thread(

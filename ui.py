@@ -143,10 +143,11 @@ class App(tk.Tk):
         self.current_page = StartPage(self, self._on_create_room, self._on_join_room)
         self.current_page.pack(fill="both", expand=True)
 
-    def _show_chat_page(self, room_name: str, nick: str, proxy_ip=None, proxy_port=0):
+    def _show_chat_page(self, room_name: str, nick: str, proxy_ip=None, proxy_port=0, server_ip=None):
         self._clear_page()
         self.current_page = ChatPage(self, room_name, nick, self._on_leave_room,
-                                      proxy_ip=proxy_ip, proxy_port=proxy_port)
+                                      proxy_ip=proxy_ip, proxy_port=proxy_port,
+                                      server_ip=server_ip)
         self.current_page.pack(fill="both", expand=True)
         # 应用在 ChatPage 创建之前缓存的用户列表
         if self._pending_users is not None:
@@ -181,7 +182,7 @@ class App(tk.Tk):
             return
 
         # 3. 切换到聊天界面
-        self._show_chat_page(room_name, nick)
+        self._show_chat_page(room_name, nick, server_ip="127.0.0.1")
 
     def _on_join_room(self, ip: str, room_name: str, nick: str, proxy_port: int = 0):
         """用户选择了一个房间加入"""
@@ -202,7 +203,7 @@ class App(tk.Tk):
             self.client = None
             return
 
-        self._show_chat_page(room_name, nick, proxy_ip=ip if proxy_port else None, proxy_port=proxy_port)
+        self._show_chat_page(room_name, nick, proxy_ip=ip if proxy_port else None, proxy_port=proxy_port, server_ip=ip)
 
     def _on_leave_room(self):
         """离开房间"""
@@ -275,12 +276,12 @@ class App(tk.Tk):
             import winreg
             key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
-                proxy_server = f"http={ip}:{port}"
+                proxy_server = f"{ip}:{port}"
                 winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, proxy_server)
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
             if isinstance(self.current_page, ChatPage):
-                self.current_page._add_system_msg(f"🌐 已启用系统代理 (http://{ip}:{port})")
-                self.current_page._add_system_msg("💡 浏览器已自动走共享网络，不使用可点「使用共享」关闭")
+                self.current_page._add_system_msg(f"🌐 已启用系统代理 ({ip}:{port})")
+                self.current_page._add_system_msg("💡 浏览器已自动走共享网络，再次点击可关闭")
         except Exception as e:
             if isinstance(self.current_page, ChatPage):
                 self.current_page._add_system_msg(f"❌ 设置系统代理失败: {e}")
@@ -759,7 +760,7 @@ class StartPage(tk.Frame):
 # ═══════════════════════════════════════════════════════════
 
 class ChatPage(tk.Frame):
-    def __init__(self, app: App, room_name: str, nick: str, on_leave, proxy_ip=None, proxy_port=0):
+    def __init__(self, app: App, room_name: str, nick: str, on_leave, proxy_ip=None, proxy_port=0, server_ip=None):
         super().__init__(app, bg=COLOR_BG)
         self.app = app
         self.room_name = room_name
@@ -769,6 +770,8 @@ class ChatPage(tk.Frame):
         # 代理信息
         self._proxy_ip = proxy_ip
         self._proxy_port = proxy_port
+        self._server_ip = server_ip or proxy_ip  # 服务器IP，后开共享时使用
+        self._proxy_active = False  # 系统代理开关状态
 
         # 在线用户列表
         self.users = []
@@ -1398,17 +1401,25 @@ class ChatPage(tk.Frame):
         self.app._toggle_proxy()
 
     def _use_proxy(self):
-        """使用对方共享的网络（设置系统代理）"""
-        if self._proxy_ip and self._proxy_port:
-            self.app._enable_system_proxy(self._proxy_ip, self._proxy_port)
-            self.use_proxy_btn.config(text="✅ 已启用", fg="#27AE60", state="disabled")
+        """切换使用/关闭对方共享的网络"""
+        if hasattr(self, "_proxy_active") and self._proxy_active:
+            # 已启用 → 关闭
+            self.app._disable_system_proxy()
+            self.use_proxy_btn.config(text="🌐 使用共享", fg=COLOR_ACCENT, state="normal")
+            self._proxy_active = False
+            self._add_system_msg("🌐 已关闭系统代理")
+        elif self._server_ip and self._proxy_port:
+            # 未启用 → 开启
+            self.app._enable_system_proxy(self._server_ip, self._proxy_port)
+            self.use_proxy_btn.config(text="✅ 关闭共享", fg="#E74C3C", state="normal")
+            self._proxy_active = True
         else:
             self._add_system_msg("❌ 未发现可用的网络共享")
 
     def _update_proxy_info(self, proxy_port: int):
         """房间代理信息更新（房主开启/关闭共享时由服务器广播触发）"""
         self._proxy_port = proxy_port
-        if proxy_port > 0 and self._proxy_ip:
+        if proxy_port > 0 and self._server_ip:
             # 显示"使用共享"按钮（如果还没显示）
             if hasattr(self, 'use_proxy_btn'):
                 if not self.use_proxy_btn.winfo_manager():
